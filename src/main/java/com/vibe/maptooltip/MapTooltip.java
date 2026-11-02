@@ -45,7 +45,7 @@ public class MapTooltip implements ClientModInitializer {
     public void onInitializeClient() {
         KeyMapping.Category cat = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath("maptooltip", "main"));
-        ANCHOR    = reg("key.maptooltip.anchor",    InputConstants.KEY_2, cat);
+                ANCHOR    = reg("key.maptooltip.anchor",    96, cat); // 96 = ` (backtick)
         GLOWSTONE = reg("key.maptooltip.glowstone", InputConstants.KEY_R, cat);
         TOTEM     = reg("key.maptooltip.totem",     InputConstants.KEY_TAB, cat);
         TOGGLE    = reg("key.maptooltip.toggle",    InputConstants.KEY_PAGEDOWN, cat);
