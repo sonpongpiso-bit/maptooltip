@@ -19,15 +19,15 @@ import net.minecraft.world.phys.HitResult;
 
 public class CrystalMacro implements ClientModInitializer {
     // ---- delays (in ticks, 20 ticks = 1 second). Raise these if your server lags. ----
-    /** Ticks to wait after switching back from obsidian before placing the crystal. */
-    static final int OBSIDIAN_DELAY_TICKS = 2;
-    /** Ticks to wait after placing the crystal before the break is allowed. */
-    static final int BREAK_DELAY_TICKS = 1;
-    /** Give up on a step after this many ticks. */
-    static final int TIMEOUT_TICKS = 12;
+    /** Ticks between each place / break action while right-click is held. */
+    static final int CYCLE_DELAY_TICKS = 1;
+    /** Ticks to wait after switching back from obsidian before the first crystal. */
+    static final int OBSIDIAN_DELAY_TICKS = 1;
+    /** Give up (until you release right-click) if the obsidian never shows up. */
+    static final int OBSIDIAN_TIMEOUT_TICKS = 20;
 
     // Obsidian step runs one stage per tick so each hotbar switch shows its animation.
-    enum State { IDLE, OBS_SELECT, OBS_PLACE, OBS_BACK, PLACE, BREAK }
+    enum State { IDLE, OBS_SELECT, OBS_PLACE, OBS_BACK, LOOP }
 
     static State state = State.IDLE;
     static BlockHitResult pendingHit = null;
@@ -35,12 +35,13 @@ public class CrystalMacro implements ClientModInitializer {
     static int invObs = -1;
     static boolean swapped = false;
     static int crystalSlot = 0;
-    static int timer = 0;
-    static boolean wasDown = false;
+    static int cooldown = 0;
+    static int idleTicks = 0;
+    static boolean blocked = false;    // failed once: stay off until right-click is released
 
     @Override
     public void onInitializeClient() {
-        ClientTickEvents.START_CLIENT_TICK.register(CrystalMacro::tick);
+        ClientTickEvents.END_CLIENT_TICK.register(CrystalMacro::tick);
     }
 
     static void reset() {
@@ -49,7 +50,8 @@ public class CrystalMacro implements ClientModInitializer {
         hotbarObs = -1;
         invObs = -1;
         swapped = false;
-        timer = 0;
+        cooldown = 0;
+        idleTicks = 0;
     }
 
     /** Stop mid-way and put your hotbar back how it was. */
@@ -64,22 +66,22 @@ public class CrystalMacro implements ClientModInitializer {
     static void tick(Minecraft mc) {
         if (mc.player == null || mc.level == null || mc.gameMode == null) {
             reset();
-            wasDown = false;
+            blocked = false;
             return;
         }
 
         boolean down = mc.options.keyUse.isDown();
-        boolean pressed = down && !wasDown;   // one cycle per click, holding does not repeat
-        wasDown = down;
+        if (!down) blocked = false;
 
-        if (state != State.IDLE && (mc.screen != null || !MapTooltip.enabled)) {
+        // stop when right-click is released, a menu opens, or the mod is off
+        if (state != State.IDLE && (!down || mc.screen != null || !MapTooltip.enabled)) {
             abort(mc);
             return;
         }
 
         switch (state) {
             case IDLE -> {
-                if (pressed && MapTooltip.enabled && mc.screen == null
+                if (down && !blocked && MapTooltip.enabled && mc.screen == null
                         && mc.player.getMainHandItem().is(Items.END_CRYSTAL)) {
                     start(mc);
                 }
@@ -98,6 +100,7 @@ public class CrystalMacro implements ClientModInitializer {
                 if (!(mc.hitResult instanceof BlockHitResult cur) || cur.getType() != HitResult.Type.BLOCK
                         || !cur.getBlockPos().equals(pendingHit.getBlockPos())
                         || cur.getDirection() != pendingHit.getDirection()) {
+                    blocked = true;
                     abort(mc);
                     return;
                 }
@@ -111,43 +114,33 @@ public class CrystalMacro implements ClientModInitializer {
                 }
                 mc.player.getInventory().setSelectedSlot(crystalSlot);     // back to the crystal (animation plays)
                 pendingHit = null;
-                timer = 0;
-                state = State.PLACE;
+                beginLoop(OBSIDIAN_DELAY_TICKS);
             }
-            case PLACE -> {
-                if (++timer > TIMEOUT_TICKS) { reset(); return; }
-                if (timer < OBSIDIAN_DELAY_TICKS) return;
+            case LOOP -> {
                 if (!mc.player.getMainHandItem().is(Items.END_CRYSTAL)) { reset(); return; }
-                if (placeOnAim(mc)) { timer = 0; state = State.BREAK; }
-            }
-            case BREAK -> {
-                if (++timer > TIMEOUT_TICKS) { reset(); return; }
-                if (timer <= BREAK_DELAY_TICKS) return;
-                // break: only when your crosshair is on an end crystal
-                if (mc.hitResult instanceof EntityHitResult eh && eh.getEntity() instanceof EndCrystal crystal) {
-                    mc.gameMode.attack(mc.player, crystal);
-                    mc.player.swing(InteractionHand.MAIN_HAND);
-                    reset();
-                }
+                loop(mc);
             }
         }
     }
 
     /** Check what you're aiming at; place obsidian only if there isn't any. */
     static void start(Minecraft mc) {
+        crystalSlot = mc.player.getInventory().getSelectedSlot();
+
+        // aiming straight at a crystal: just start the loop
+        if (mc.hitResult instanceof EntityHitResult eh && eh.getEntity() instanceof EndCrystal) {
+            beginLoop(0);
+            return;
+        }
+
         if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return;
 
         BlockPos target = hit.getBlockPos();
         BlockState st = mc.level.getBlockState(target);
 
-        // Already aiming at obsidian/bedrock: never place obsidian, just place the crystal.
+        // Already aiming at obsidian/bedrock: never place obsidian, go straight to the loop.
         if (isBase(st)) {
-            if (!canPlaceCrystal(mc, target)) return;
-            takeOverClick(mc);
-            crystalSlot = mc.player.getInventory().getSelectedSlot();
-            use(mc, hit);                                                  // place packet
-            timer = 0;
-            state = State.BREAK;
+            beginLoop(0);
             return;
         }
 
@@ -158,39 +151,56 @@ public class CrystalMacro implements ClientModInitializer {
         if (!mc.level.getBlockState(spot.above()).isAir()) return;
 
         // Obsidian already underneath that spot: don't stack another one.
-        if (isBase(mc.level.getBlockState(spot.below()))) return;
+        if (isBase(mc.level.getBlockState(spot.below()))) {
+            beginLoop(0);
+            return;
+        }
 
         hotbarObs = findHotbar(mc, Items.OBSIDIAN);
         invObs = hotbarObs >= 0 ? -1 : findInventory(mc, Items.OBSIDIAN);
-        if (hotbarObs < 0 && invObs < 0) return;
+        if (hotbarObs < 0 && invObs < 0) { blocked = true; return; }
 
-        takeOverClick(mc);
-        crystalSlot = mc.player.getInventory().getSelectedSlot();
         pendingHit = hit;
         swapped = false;
         state = State.OBS_SELECT;
     }
 
-    /** Place the crystal on the obsidian your crosshair is on. */
-    static boolean placeOnAim(Minecraft mc) {
-        if (mc.hitResult instanceof BlockHitResult bh && bh.getType() == HitResult.Type.BLOCK
-                && isBase(mc.level.getBlockState(bh.getBlockPos()))
-                && canPlaceCrystal(mc, bh.getBlockPos())) {
-            use(mc, bh);                                                   // place packet
-            return true;
+    static void beginLoop(int delay) {
+        cooldown = delay;
+        idleTicks = 0;
+        state = State.LOOP;
+    }
+
+    /** Runs every tick while right-click is held. Acts only on whatever your crosshair is actually on. */
+    static void loop(Minecraft mc) {
+        if (--cooldown > 0) return;
+        cooldown = CYCLE_DELAY_TICKS;
+
+        if (!mc.player.getInventory().getItem(crystalSlot).is(Items.END_CRYSTAL)) {
+            blocked = true;
+            reset();
+            return;
         }
-        return false;
-    }
 
-    static boolean canPlaceCrystal(Minecraft mc, BlockPos base) {
-        return mc.level.getBlockState(base.above()).isAir()
-                && mc.level.getEntitiesOfClass(EndCrystal.class, new AABB(base.above())).isEmpty();
-    }
+        HitResult hr = mc.hitResult;
 
-    /** The macro handles this click, so the game doesn't also place a crystal on its own. */
-    static void takeOverClick(Minecraft mc) {
-        while (mc.options.keyUse.consumeClick()) { }
-        mc.options.keyUse.setDown(false);
+        // break: only when your crosshair is on an end crystal
+        if (hr instanceof EntityHitResult eh && eh.getEntity() instanceof EndCrystal crystal) {
+            mc.gameMode.attack(mc.player, crystal);
+            mc.player.swing(InteractionHand.MAIN_HAND);
+            return;
+        }
+
+        // place: only when your crosshair is on obsidian/bedrock with free space above it
+        if (hr instanceof BlockHitResult bh && bh.getType() == HitResult.Type.BLOCK) {
+            BlockPos pos = bh.getBlockPos();
+            if (isBase(mc.level.getBlockState(pos))
+                    && mc.level.getBlockState(pos.above()).isAir()
+                    && mc.level.getEntitiesOfClass(EndCrystal.class, new AABB(pos.above())).isEmpty()) {
+                use(mc, bh);
+            }
+        }
+        // looking anywhere else: do nothing until you aim back
     }
 
     static boolean isBase(BlockState st) {
@@ -217,7 +227,7 @@ public class CrystalMacro implements ClientModInitializer {
                 mc.player.inventoryMenu.containerId, invSlot, hotbarSlot, ContainerInput.SWAP, mc.player);
     }
 
-        static void use(Minecraft mc, BlockHitResult hit) {
+    static void use(Minecraft mc, BlockHitResult hit) {
         mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, hit);
         mc.player.swing(InteractionHand.MAIN_HAND);
     }
