@@ -12,6 +12,8 @@ public class HoverTotem {
     static final boolean HOVER_TOTEM = true;
     /** Hotbar slot for the mainhand totem (0 = slot 1, 8 = slot 9). */
     static final int TOTEM_HOTBAR_SLOT = 8;
+    /** Select the totem hotbar slot whenever you open your inventory. */
+    static final boolean SELECT_SLOT_ON_OPEN = true;
 
     // Menu slot numbers in the inventory screen: 9-35 main inventory, 36-44 hotbar.
     static final int MENU_FIRST = 9;
@@ -24,6 +26,9 @@ public class HoverTotem {
         if (!HOVER_TOTEM) return;
         ScreenEvents.AFTER_INIT.register((client, screen, w, h) -> {
             if (screen instanceof InventoryScreen inv) {
+                if (SELECT_SLOT_ON_OPEN && MapTooltip.enabled && client.player != null) {
+                    client.player.getInventory().setSelectedSlot(TOTEM_HOTBAR_SLOT);
+                }
                 ScreenEvents.afterTick(screen).register(s -> tick(client, inv));
             }
         });
