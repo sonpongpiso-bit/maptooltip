@@ -14,6 +14,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.resources.Identifier;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.item.Item;
@@ -94,8 +95,12 @@ public class MapTooltip implements ClientModInitializer {
     static boolean placeAnchor(Minecraft mc) {
         if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return false;
         if (!select(mc, Items.RESPAWN_ANCHOR)) return false;
+
+        // fire, tall grass, snow layers etc. get replaced, so the anchor lands in that spot
+        boolean replaces = mc.level.getBlockState(hit.getBlockPos()).is(BlockTags.REPLACEABLE);
+
         use(mc, hit);
-        anchorPos = hit.getBlockPos().relative(hit.getDirection());
+        anchorPos = replaces ? hit.getBlockPos() : hit.getBlockPos().relative(hit.getDirection());
         return true;
     }
 
