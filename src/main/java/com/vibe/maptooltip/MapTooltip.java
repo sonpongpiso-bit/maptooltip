@@ -1,183 +1,72 @@
 package com.vibe.maptooltip;
 
-import com.mojang.blaze3d.platform.InputConstants;
-import net.fabricmc.api.ClientModInitializer;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
-import net.minecraft.client.KeyMapping;
+import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Options;
-import net.minecraft.client.multiplayer.MultiPlayerGameMode;
-import net.minecraft.client.player.LocalPlayer;
-import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
-import net.minecraft.network.chat.Component;
-import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
-import net.minecraft.resources.Identifier;
-import net.minecraft.world.InteractionHand;
-import net.minecraft.world.entity.player.Input;
-import net.minecraft.world.item.Item;
-import net.minecraft.world.item.ItemStack;
+import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+import net.minecraft.world.inventory.ContainerInput;
+import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Items;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.RespawnAnchorBlock;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.phys.BlockHitResult;
-import net.minecraft.world.phys.HitResult;
-import net.minecraft.world.phys.Vec3;
 
-public class MapTooltip implements ClientModInitializer {
-    /** Run the full combo off the anchor key. */
-    static final boolean AUTO_CHAIN = true;
-    /** 0 = everything in one tick, 1 = place+charge+shield on tick 0, detonate on tick 1. */
-    static final int DETONATE_DELAY_TICKS = 1;
-    /** Whether the mod starts switched on. */
-    static final boolean START_ENABLED = true;
+public class HoverTotem {
+    /** Turn the hover-totem feature on or off. */
+    static final boolean HOVER_TOTEM = true;
+    /** Hotbar slot for the mainhand totem (0 = slot 1, 8 = slot 9). */
+    static final int TOTEM_HOTBAR_SLOT = 8;
 
-    static KeyMapping ANCHOR, GLOWSTONE, TOTEM, TOGGLE;
+    // Menu slot numbers in the inventory screen: 9-35 main inventory, 36-44 hotbar.
+    static final int MENU_FIRST = 9;
+    static final int MENU_LAST = 44;
+    static final int MENU_HOTBAR_START = 36;
 
-    static boolean enabled = START_ENABLED;
-    static BlockPos anchorPos = null;
-    static int detonateIn = -1;
+    static int cooldown = 0;
 
-    @Override
-    public void onInitializeClient() {
-        KeyMapping.Category cat = KeyMapping.Category.register(
-                Identifier.fromNamespaceAndPath("maptooltip", "main"));
-        ANCHOR    = reg("key.maptooltip.anchor",    InputConstants.KEY_2, cat);
-        GLOWSTONE = reg("key.maptooltip.glowstone", InputConstants.KEY_R, cat);
-        TOTEM     = reg("key.maptooltip.totem",     InputConstants.KEY_TAB, cat);
-        TOGGLE    = reg("key.maptooltip.toggle",    InputConstants.KEY_PAGEDOWN, cat);
-
-        ClientTickEvents.END_CLIENT_TICK.register(MapTooltip::tick);
-    }
-
-    static KeyMapping reg(String name, int key, KeyMapping.Category cat) {
-        return KeyMappingHelper.registerKeyMapping(
-                new KeyMapping(name, InputConstants.Type.KEYSYM, key, cat));
-    }
-
-    static void tick(Minecraft mc) {
-        LocalPlayer p = mc.player;
-        MultiPlayerGameMode gm = mc.gameMode;
-        if (p == null || gm == null) return;
-
-        while (TOGGLE.consumeClick()) {
-            enabled = !enabled;
-            detonateIn = -1;
-                    mc.gui.setOverlayMessage(Component.literal("maptooltip: " + (enabled ? "on" : "off")), false);
-        }
-
-        if (mc.screen != null) return;
-
-        // Always drain the keys so presses while off don't pile up.
-        boolean a = false, g = false, t = false;
-        while (ANCHOR.consumeClick()) a = true;
-        while (GLOWSTONE.consumeClick()) g = true;
-        while (TOTEM.consumeClick()) t = true;
-        if (!enabled) return;
-
-        if (detonateIn >= 0 && --detonateIn < 0) detonate(mc);
-
-        if (a && placeAnchor(mc) && AUTO_CHAIN) {
-            chargeAndShield(mc);
-            if (DETONATE_DELAY_TICKS <= 0) detonate(mc);
-            else detonateIn = DETONATE_DELAY_TICKS;
-        }
-        if (g) chargeAndShield(mc);
-        if (t) detonate(mc);
-    }
-
-    // ---- stages -------------------------------------------------------------
-
-    static boolean placeAnchor(Minecraft mc) {
-        if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return false;
-        if (!select(mc, Items.RESPAWN_ANCHOR)) return false;
-        use(mc, hit);
-        anchorPos = hit.getBlockPos().relative(hit.getDirection());
-        return true;
-    }
-
-    static void chargeAndShield(Minecraft mc) {
-        if (anchorPos == null || !select(mc, Items.GLOWSTONE)) return;
-        LocalPlayer p = mc.player;
-        unsneaked(mc, () -> {
-            // charge the anchor once
-            use(mc, clickOn(anchorPos));
-
-            // shield on your side of the anchor, placed on top of the floor block there
-            Direction towardYou = p.getDirection().getOpposite();
-            BlockPos floor = anchorPos.below().relative(towardYou);
-            use(mc, new BlockHitResult(Vec3.atCenterOf(floor).add(0, 0.5, 0), Direction.UP, floor, false));
+    static void init() {
+        if (!HOVER_TOTEM) return;
+        ScreenEvents.AFTER_INIT.register((client, screen, w, h) -> {
+            if (screen instanceof InventoryScreen inv) {
+                ScreenEvents.afterTick(screen).register(s -> tick(client, inv));
+            }
         });
     }
 
-    static void detonate(Minecraft mc) {
-        if (anchorPos == null) return;
-        unsneaked(mc, () -> {
-            // if the charge didn't land, charge again before detonating
-            BlockState st = mc.level.getBlockState(anchorPos);
-            if (st.is(Blocks.RESPAWN_ANCHOR)
-                    && st.getValue(RespawnAnchorBlock.CHARGE) == 0
-                    && select(mc, Items.GLOWSTONE)) {
-                use(mc, clickOn(anchorPos));
-            }
-            // totem if you have one, otherwise an empty slot, otherwise any non-glowstone item
-            if (!pickDetonator(mc)) return;
-            use(mc, clickOn(anchorPos));
-        });
+    static void swap(Minecraft mc, Slot slot, int button) {
+        mc.gameMode.handleContainerInput(
+                mc.player.containerMenu.containerId, slot.index, button, ContainerInput.SWAP, mc.player);
+        cooldown = 2;
     }
 
-    // ---- helpers ------------------------------------------------------------
-
-    static BlockHitResult clickOn(BlockPos pos) {
-        return new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
-    }
-
-    /** Holding sneak makes the server place the glowstone instead of using the anchor, so release it for the clicks. */
-    static void unsneaked(Minecraft mc, Runnable r) {
-        Options o = mc.options;
-        var conn = mc.getConnection();
-        boolean sneaking = conn != null && (o.keyShift.isDown() || mc.player.isShiftKeyDown());
-        if (sneaking) conn.send(new ServerboundPlayerInputPacket(input(o, false)));
-        try {
-            r.run();
-        } finally {
-            if (sneaking) conn.send(new ServerboundPlayerInputPacket(input(o, o.keyShift.isDown())));
-        }
-    }
-
-    static Input input(Options o, boolean shift) {
-        return new Input(o.keyUp.isDown(), o.keyDown.isDown(), o.keyLeft.isDown(),
-                o.keyRight.isDown(), o.keyJump.isDown(), shift, o.keySprint.isDown());
-    }
-
-    static boolean pickDetonator(Minecraft mc) {
-        if (select(mc, Items.TOTEM_OF_UNDYING)) return true;
-        LocalPlayer p = mc.player;
-        for (int i = 0; i < 9; i++) {
-            if (p.getInventory().getItem(i).isEmpty()) { p.getInventory().setSelectedSlot(i); return true; }
-        }
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = p.getInventory().getItem(i);
-            if (!s.is(Items.GLOWSTONE)) { p.getInventory().setSelectedSlot(i); return true; }
-        }
-        return false;
-    }
-
-    static boolean select(Minecraft mc, Item item) {
-        LocalPlayer p = mc.player;
-        for (int i = 0; i < 9; i++) {
-            if (p.getInventory().getItem(i).is(item)) {
-                p.getInventory().setSelectedSlot(i);
-                return true;
+    /** Finds the inventory slot under the mouse cursor. */
+    static Slot slotUnderMouse(Minecraft mc, InventoryScreen screen) {
+        double mx = mc.mouseHandler.xpos() * mc.getWindow().getGuiScaledWidth() / mc.getWindow().getScreenWidth();
+        double my = mc.mouseHandler.ypos() * mc.getWindow().getGuiScaledHeight() / mc.getWindow().getScreenHeight();
+        int left = (screen.width - 176) / 2;
+        int top = (screen.height - 166) / 2;
+        for (Slot s : mc.player.containerMenu.slots) {
+            if (mx >= left + s.x - 1 && mx < left + s.x + 17
+                    && my >= top + s.y - 1 && my < top + s.y + 17) {
+                return s;
             }
         }
-        return false;
+        return null;
     }
 
-    static void use(Minecraft mc, BlockHitResult hit) {
-        mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, hit);
-        mc.player.swing(InteractionHand.MAIN_HAND);
+    static void tick(Minecraft mc, InventoryScreen screen) {
+        if (!MapTooltip.enabled || mc.player == null || mc.gameMode == null) return;
+        if (cooldown > 0) { cooldown--; return; }
+
+        Slot slot = slotUnderMouse(mc, screen);
+        if (slot == null || !slot.getItem().is(Items.TOTEM_OF_UNDYING)) return;
+        // only inventory + hotbar slots (not armor, crafting or the offhand slot itself)
+        if (slot.index < MENU_FIRST || slot.index > MENU_LAST) return;
+
+        boolean offhandHasTotem = mc.player.getOffhandItem().is(Items.TOTEM_OF_UNDYING);
+        boolean mainSlotHasTotem = mc.player.getInventory().getItem(TOTEM_HOTBAR_SLOT).is(Items.TOTEM_OF_UNDYING);
+        int mainMenuIndex = MENU_HOTBAR_START + TOTEM_HOTBAR_SLOT;
+
+        if (!offhandHasTotem) {
+            swap(mc, slot, 40);                       // 40 = offhand
+        } else if (!mainSlotHasTotem && slot.index != mainMenuIndex) {
+            swap(mc, slot, TOTEM_HOTBAR_SLOT);        // 0-8 = hotbar slot
+        }
     }
 }
