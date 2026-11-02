@@ -9,6 +9,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -19,20 +20,28 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
+
 public class AnchorMacro implements ClientModInitializer {
+    /** Ticks between steps (1 = one step every tick). */
+    static final int STEP_TICKS = 1;
     /** Give up after this many ticks (20 ticks = 1 second). */
     static final int TIMEOUT_TICKS = 60;
     /** Ticks between charge attempts if the charge hasn't shown up yet. */
     static final int RETRY_TICKS = 3;
 
-    // One stage per tick so each hotbar switch shows its animation.
-    enum State { IDLE, SWITCH_GLOW, CHARGE, SWITCH_TOTEM, DETONATE }
+    // One stage per step so each hotbar switch shows its animation.
+    enum State { IDLE, SWITCH_GLOW, CHARGE, SWITCH_TOTEM, DETONATE, RESTORE }
 
     static State state = State.IDLE;
     static BlockPos anchorPos = null;
     static int timer = 0;
     static int sinceTry = 0;
+    static int stepWait = 0;
     static boolean wasDown = false;
+
+    /** Inventory swaps we made, so they can be undone afterwards: {inventory slot, hotbar slot}. */
+    static final ArrayDeque<int[]> swaps = new ArrayDeque<>();
 
     @Override
     public void onInitializeClient() {
@@ -43,6 +52,7 @@ public class AnchorMacro implements ClientModInitializer {
         LocalPlayer p = mc.player;
         if (p == null || mc.level == null || mc.gameMode == null) {
             state = State.IDLE;
+            swaps.clear();
             wasDown = false;
             return;
         }
@@ -52,23 +62,23 @@ public class AnchorMacro implements ClientModInitializer {
         wasDown = down;
 
         if (state != State.IDLE) {
-            if (!MapTooltip.enabled || mc.screen != null) { state = State.IDLE; return; }
+            if (!MapTooltip.enabled || mc.screen != null) { abort(mc); return; }
             run(mc);
             return;
         }
 
         if (!pressed || !MapTooltip.enabled || mc.screen != null) return;
-        if (!p.getMainHandItem().is(Items.RESPAWN_ANCHOR)) return;
-        if (findSlot(mc, Items.GLOWSTONE) < 0) return;
         if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return;
+        if (!hasItem(mc, Items.GLOWSTONE)) return;            // no glowstone anywhere: let vanilla handle it
 
         BlockState st = mc.level.getBlockState(hit.getBlockPos());
         boolean existing = st.is(Blocks.RESPAWN_ANCHOR);
 
         BlockPos spot;
         if (existing) {
-            spot = hit.getBlockPos();
+            spot = hit.getBlockPos();                          // already placed: skip placement, any held item works
         } else {
+            if (!p.getMainHandItem().is(Items.RESPAWN_ANCHOR)) return;
             // fire, tall grass, snow layers etc. get replaced, so the anchor lands in that spot
             spot = st.is(BlockTags.REPLACEABLE) ? hit.getBlockPos() : hit.getBlockPos().relative(hit.getDirection());
             BlockState spotState = mc.level.getBlockState(spot);
@@ -80,14 +90,15 @@ public class AnchorMacro implements ClientModInitializer {
         mc.options.keyUse.setDown(false);
 
         anchorPos = spot;
-        if (!existing) use(mc, hit);                          // place the anchor
+        if (!existing) use(mc, hit);                           // place the anchor
         timer = 0;
         sinceTry = 0;
+        stepWait = 0;
         state = State.SWITCH_GLOW;
     }
 
     static void run(Minecraft mc) {
-        if (++timer > TIMEOUT_TICKS) { state = State.IDLE; return; }
+        if (++timer > TIMEOUT_TICKS) { abort(mc); return; }
 
         // sneaking makes the game place glowstone as a block instead of charging, so wait for release
         if (mc.player.isShiftKeyDown()) {
@@ -95,11 +106,14 @@ public class AnchorMacro implements ClientModInitializer {
             return;
         }
 
+        if (--stepWait > 0) return;
+        stepWait = STEP_TICKS;
+
         BlockState st = mc.level.getBlockState(anchorPos);
 
         switch (state) {
             case SWITCH_GLOW -> {
-                if (!select(mc, Items.GLOWSTONE)) { state = State.IDLE; return; }   // switch (animation plays)
+                if (!bring(mc, Items.GLOWSTONE)) { abort(mc); return; }            // switch (animation plays)
                 state = State.CHARGE;
                 sinceTry = RETRY_TICKS;
             }
@@ -111,20 +125,29 @@ public class AnchorMacro implements ClientModInitializer {
                 }
                 if (++sinceTry >= RETRY_TICKS) {                                    // charge, and re-try until it shows
                     sinceTry = 0;
-                    select(mc, Items.GLOWSTONE);
+                    bring(mc, Items.GLOWSTONE);
                     use(mc, clickOn(anchorPos));
                 }
             }
             case SWITCH_TOTEM -> {
-                pickDetonator(mc);                                                  // switch to the mainhand totem (animation plays)
+                bringDetonator(mc);                                                 // switch to the totem (animation plays)
                 state = State.DETONATE;
             }
             case DETONATE -> {
                 if (st.is(Blocks.RESPAWN_ANCHOR)) use(mc, clickOn(anchorPos));
+                state = State.RESTORE;
+            }
+            case RESTORE -> {
+                undoSwaps(mc);                                                      // put any swapped items back
                 state = State.IDLE;
             }
             default -> state = State.IDLE;
         }
+    }
+
+    static void abort(Minecraft mc) {
+        undoSwaps(mc);
+        state = State.IDLE;
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -133,32 +156,63 @@ public class AnchorMacro implements ClientModInitializer {
         return new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
     }
 
-    static int findSlot(Minecraft mc, Item item) {
+    static int hotbarSlot(Minecraft mc, Item item) {
         for (int i = 0; i < 9; i++) {
             if (mc.player.getInventory().getItem(i).is(item)) return i;
         }
         return -1;
     }
 
-    static boolean select(Minecraft mc, Item item) {
-        int i = findSlot(mc, item);
-        if (i < 0) return false;
-        mc.player.getInventory().setSelectedSlot(i);
+    static int invSlot(Minecraft mc, Item item) {
+        for (int i = 9; i < 36; i++) {
+            if (mc.player.getInventory().getItem(i).is(item)) return i;
+        }
+        return -1;
+    }
+
+    static boolean hasItem(Minecraft mc, Item item) {
+        return hotbarSlot(mc, item) >= 0 || invSlot(mc, item) >= 0;
+    }
+
+    /** Hold the item: select its hotbar slot, or swap it in from the main inventory (undone later). */
+    static boolean bring(Minecraft mc, Item item) {
+        int h = hotbarSlot(mc, item);
+        if (h >= 0) {
+            mc.player.getInventory().setSelectedSlot(h);
+            return true;
+        }
+        int inv = invSlot(mc, item);
+        if (inv < 0) return false;
+        int sel = mc.player.getInventory().getSelectedSlot();
+        swapIn(mc, inv, sel);
+        swaps.push(new int[] { inv, sel });
         return true;
     }
 
-    /** Totem if you have one, otherwise an empty slot, otherwise any non-glowstone item. */
-    static boolean pickDetonator(Minecraft mc) {
-        if (select(mc, Items.TOTEM_OF_UNDYING)) return true;
+    /** Totem from anywhere in the inventory, otherwise an empty slot, otherwise any non-glowstone item. */
+    static void bringDetonator(Minecraft mc) {
+        if (bring(mc, Items.TOTEM_OF_UNDYING)) return;
         LocalPlayer p = mc.player;
         for (int i = 0; i < 9; i++) {
-            if (p.getInventory().getItem(i).isEmpty()) { p.getInventory().setSelectedSlot(i); return true; }
+            if (p.getInventory().getItem(i).isEmpty()) { p.getInventory().setSelectedSlot(i); return; }
         }
         for (int i = 0; i < 9; i++) {
             ItemStack s = p.getInventory().getItem(i);
-            if (!s.is(Items.GLOWSTONE)) { p.getInventory().setSelectedSlot(i); return true; }
+            if (!s.is(Items.GLOWSTONE)) { p.getInventory().setSelectedSlot(i); return; }
         }
-        return false;
+    }
+
+    static void undoSwaps(Minecraft mc) {
+        while (!swaps.isEmpty()) {
+            int[] s = swaps.pop();
+            swapIn(mc, s[0], s[1]);
+        }
+    }
+
+    /** Normal inventory swap click: inventory slot (9-35) with a hotbar slot (0-8). */
+    static void swapIn(Minecraft mc, int invSlot, int hotbarSlot) {
+        mc.gameMode.handleContainerInput(
+                mc.player.inventoryMenu.containerId, invSlot, hotbarSlot, ContainerInput.SWAP, mc.player);
     }
 
     static void use(Minecraft mc, BlockHitResult hit) {
