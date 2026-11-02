@@ -65,7 +65,7 @@ public class MapTooltip implements ClientModInitializer {
         while (TOGGLE.consumeClick()) {
             enabled = !enabled;
             detonateIn = -1;
-            p.displayClientMessage(Component.literal("maptooltip: " + (enabled ? "on" : "off")), true);
+                    mc.gui.setOverlayMessage(Component.literal("maptooltip: " + (enabled ? "on" : "off")), false);
         }
 
         if (mc.screen != null) return;
