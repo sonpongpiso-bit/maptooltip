@@ -9,7 +9,8 @@
   "entrypoints": {
     "client": [
       "com.vibe.maptooltip.MapTooltip",
-      "com.vibe.maptooltip.CrystalMacro"
+      "com.vibe.maptooltip.CrystalMacro",
+      "com.vibe.maptooltip.AnchorMacro"
     ]
   },
   "depends": { "fabricloader": "*", "fabric-api": "*", "minecraft": "*" }
