@@ -6,6 +6,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.network.chat.Component;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.Item;
@@ -18,15 +19,19 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
-import java.util.ArrayDeque;
-
 public class AnchorMacro implements ClientModInitializer {
-    /** Ticks between steps. Every hotbar switch gets its own step so the equip animation plays. */
-    static final int STEP_TICKS = 1;
+    /** Give up after this many ticks (20 ticks = 1 second). */
+    static final int TIMEOUT_TICKS = 60;
+    /** Ticks between charge attempts if the charge hasn't shown up yet. */
+    static final int RETRY_TICKS = 3;
 
-    static final ArrayDeque<Runnable> queue = new ArrayDeque<>();
+    // One stage per tick so each hotbar switch shows its animation.
+    enum State { IDLE, SWITCH_GLOW, CHARGE, SWITCH_TOTEM, DETONATE }
+
+    static State state = State.IDLE;
     static BlockPos anchorPos = null;
-    static int wait = 0;
+    static int timer = 0;
+    static int sinceTry = 0;
     static boolean wasDown = false;
 
     @Override
@@ -37,19 +42,8 @@ public class AnchorMacro implements ClientModInitializer {
     static void tick(Minecraft mc) {
         LocalPlayer p = mc.player;
         if (p == null || mc.level == null || mc.gameMode == null) {
-            queue.clear();
+            state = State.IDLE;
             wasDown = false;
-            return;
-        }
-
-        // run the queued steps, one per STEP_TICKS
-        if (!queue.isEmpty()) {
-            if (!MapTooltip.enabled || mc.screen != null) { queue.clear(); return; }
-            if (--wait <= 0) {
-                queue.poll().run();
-                wait = STEP_TICKS;
-            }
-            wasDown = mc.options.keyUse.isDown();
             return;
         }
 
@@ -57,9 +51,14 @@ public class AnchorMacro implements ClientModInitializer {
         boolean pressed = down && !wasDown;
         wasDown = down;
 
+        if (state != State.IDLE) {
+            if (!MapTooltip.enabled || mc.screen != null) { state = State.IDLE; return; }
+            run(mc);
+            return;
+        }
+
         if (!pressed || !MapTooltip.enabled || mc.screen != null) return;
         if (!p.getMainHandItem().is(Items.RESPAWN_ANCHOR)) return;
-        if (p.isShiftKeyDown()) return;                       // sneaking would place the glowstone instead of charging
         if (findSlot(mc, Items.GLOWSTONE) < 0) return;
         if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return;
 
@@ -82,30 +81,50 @@ public class AnchorMacro implements ClientModInitializer {
 
         anchorPos = spot;
         if (!existing) use(mc, hit);                          // place the anchor
-
-        wait = 0;
-        queue.clear();
-        queue.add(() -> select(mc, Items.GLOWSTONE));         // switch (animation plays)
-        queue.add(() -> use(mc, clickOn(anchorPos)));         // charge the anchor
-        queue.add(() -> pickDetonator(mc));                   // switch to the mainhand totem (animation plays)
-        queue.add(() -> detonate(mc, true));                  // detonate
+        timer = 0;
+        sinceTry = 0;
+        state = State.SWITCH_GLOW;
     }
 
-    static void detonate(Minecraft mc, boolean retry) {
-        if (anchorPos == null) return;
+    static void run(Minecraft mc) {
+        if (++timer > TIMEOUT_TICKS) { state = State.IDLE; return; }
 
-        // if the charge didn't land, charge again once before detonating
-        BlockState st = mc.level.getBlockState(anchorPos);
-        if (retry && st.is(Blocks.RESPAWN_ANCHOR)
-                && st.getValue(RespawnAnchorBlock.CHARGE) == 0
-                && findSlot(mc, Items.GLOWSTONE) >= 0) {
-            queue.addFirst(() -> detonate(mc, false));
-            queue.addFirst(() -> pickDetonator(mc));
-            queue.addFirst(() -> use(mc, clickOn(anchorPos)));
-            queue.addFirst(() -> select(mc, Items.GLOWSTONE));
+        // sneaking makes the game place glowstone as a block instead of charging, so wait for release
+        if (mc.player.isShiftKeyDown()) {
+            mc.gui.setOverlayMessage(Component.literal("anchor: release sneak"), false);
             return;
         }
-        use(mc, clickOn(anchorPos));
+
+        BlockState st = mc.level.getBlockState(anchorPos);
+
+        switch (state) {
+            case SWITCH_GLOW -> {
+                if (!select(mc, Items.GLOWSTONE)) { state = State.IDLE; return; }   // switch (animation plays)
+                state = State.CHARGE;
+                sinceTry = RETRY_TICKS;
+            }
+            case CHARGE -> {
+                if (!st.is(Blocks.RESPAWN_ANCHOR)) return;                          // wait for the anchor to appear
+                if (st.getValue(RespawnAnchorBlock.CHARGE) > 0) {                   // charged: on to the totem
+                    state = State.SWITCH_TOTEM;
+                    return;
+                }
+                if (++sinceTry >= RETRY_TICKS) {                                    // charge, and re-try until it shows
+                    sinceTry = 0;
+                    select(mc, Items.GLOWSTONE);
+                    use(mc, clickOn(anchorPos));
+                }
+            }
+            case SWITCH_TOTEM -> {
+                pickDetonator(mc);                                                  // switch to the mainhand totem (animation plays)
+                state = State.DETONATE;
+            }
+            case DETONATE -> {
+                if (st.is(Blocks.RESPAWN_ANCHOR)) use(mc, clickOn(anchorPos));
+                state = State.IDLE;
+            }
+            default -> state = State.IDLE;
+        }
     }
 
     // ---- helpers ------------------------------------------------------------
