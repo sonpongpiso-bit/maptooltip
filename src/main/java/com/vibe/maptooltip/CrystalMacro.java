@@ -217,5 +217,8 @@ public class CrystalMacro implements ClientModInitializer {
                 mc.player.inventoryMenu.containerId, invSlot, hotbarSlot, ContainerInput.SWAP, mc.player);
     }
 
-    static void use(Minecraft mc, BlockHitResult hit) {
+        static void use(Minecraft mc, BlockHitResult hit) {
         mc.gameMode.useItemOn(mc.player, InteractionHand.MAIN_HAND, hit);
+        mc.player.swing(InteractionHand.MAIN_HAND);
+    }
+}
