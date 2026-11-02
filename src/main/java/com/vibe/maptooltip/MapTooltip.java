@@ -24,11 +24,13 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
+
 public class MapTooltip implements ClientModInitializer {
     /** Run the full combo off the anchor key. */
     static final boolean AUTO_CHAIN = true;
-    /** 0 = everything in one tick, 1 = place+charge+shield on tick 0, detonate on tick 1. */
-    static final int DETONATE_DELAY_TICKS = 1;
+    /** Ticks between steps. Every hotbar switch gets its own step so the equip animation plays. */
+    static final int STEP_TICKS = 1;
     /** Whether the mod starts switched on. */
     static final boolean START_ENABLED = true;
 
@@ -36,7 +38,9 @@ public class MapTooltip implements ClientModInitializer {
 
     static boolean enabled = START_ENABLED;
     static BlockPos anchorPos = null;
-    static int detonateIn = -1;
+
+    static final ArrayDeque<Runnable> queue = new ArrayDeque<>();
+    static int wait = 0;
 
     @Override
     public void onInitializeClient() {
@@ -56,81 +60,98 @@ public class MapTooltip implements ClientModInitializer {
                 new KeyMapping(name, InputConstants.Type.KEYSYM, key, cat));
     }
 
+    static void q(Runnable r) { queue.add(r); }
+
     static void tick(Minecraft mc) {
         LocalPlayer p = mc.player;
         MultiPlayerGameMode gm = mc.gameMode;
-        if (p == null || gm == null) return;
+        if (p == null || gm == null) { queue.clear(); return; }
 
         while (TOGGLE.consumeClick()) {
             enabled = !enabled;
-            detonateIn = -1;
+            queue.clear();
             mc.gui.setOverlayMessage(Component.literal("maptooltip: " + (enabled ? "on" : "off")), false);
         }
 
-        if (mc.screen != null) return;
+        if (mc.screen != null) { queue.clear(); return; }
 
         // Always drain the keys so presses while off don't pile up.
         boolean a = false, g = false, t = false;
         while (ANCHOR.consumeClick()) a = true;
         while (GLOWSTONE.consumeClick()) g = true;
         while (TOTEM.consumeClick()) t = true;
-        if (!enabled) return;
+        if (!enabled) { queue.clear(); return; }
 
-        if (detonateIn >= 0 && --detonateIn < 0) detonate(mc);
+        // run one queued step per STEP_TICKS
+        if (!queue.isEmpty()) {
+            if (--wait <= 0) {
+                queue.poll().run();
+                wait = STEP_TICKS;
+            }
+            return;   // ignore new presses until the combo is finished
+        }
 
         if ((a || g || t) && p.isShiftKeyDown()) {
             mc.gui.setOverlayMessage(Component.literal("maptooltip: release sneak"), false);
             return;
         }
 
-        if (a && placeAnchor(mc) && AUTO_CHAIN) {
-            chargeAndShield(mc);
-            if (DETONATE_DELAY_TICKS <= 0) detonate(mc);
-            else detonateIn = DETONATE_DELAY_TICKS;
-        }
-        if (g) chargeAndShield(mc);
-        if (t) detonate(mc);
+        if (a) startCombo(mc);
+        else if (g) { queueCharge(mc); wait = 0; }
+        else if (t) { queueDetonate(mc); wait = 0; }
     }
 
-    // ---- stages -------------------------------------------------------------
+    // ---- combo --------------------------------------------------------------
 
-    static boolean placeAnchor(Minecraft mc) {
-        if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return false;
-        if (!select(mc, Items.RESPAWN_ANCHOR)) return false;
+    static void startCombo(Minecraft mc) {
+        if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return;
+        if (findSlot(mc, Items.RESPAWN_ANCHOR) < 0) return;
 
         // fire, tall grass, snow layers etc. get replaced, so the anchor lands in that spot
         boolean replaces = mc.level.getBlockState(hit.getBlockPos()).is(BlockTags.REPLACEABLE);
-
-        use(mc, hit);
         anchorPos = replaces ? hit.getBlockPos() : hit.getBlockPos().relative(hit.getDirection());
-        return true;
+
+        queue.clear();
+        wait = 0;
+        q(() -> select(mc, Items.RESPAWN_ANCHOR));   // switch (animation plays)
+        q(() -> use(mc, hit));                       // place the anchor
+        if (AUTO_CHAIN) {
+            queueCharge(mc);
+            queueDetonate(mc);
+        }
     }
 
-    static void chargeAndShield(Minecraft mc) {
-        if (anchorPos == null || !select(mc, Items.GLOWSTONE)) return;
-        LocalPlayer p = mc.player;
-
-        // charge the anchor once
-        use(mc, clickOn(anchorPos));
-
-        // shield on your side of the anchor, placed on top of the floor block there
-        Direction towardYou = p.getDirection().getOpposite();
-        BlockPos floor = anchorPos.below().relative(towardYou);
-        use(mc, new BlockHitResult(Vec3.atCenterOf(floor).add(0, 0.5, 0), Direction.UP, floor, false));
+    static void queueCharge(Minecraft mc) {
+        if (anchorPos == null) return;
+        q(() -> select(mc, Items.GLOWSTONE));        // switch (animation plays)
+        q(() -> use(mc, clickOn(anchorPos)));        // charge the anchor once
+        q(() -> {                                    // shield on your side of the anchor
+            Direction towardYou = mc.player.getDirection().getOpposite();
+            BlockPos floor = anchorPos.below().relative(towardYou);
+            use(mc, new BlockHitResult(Vec3.atCenterOf(floor).add(0, 0.5, 0), Direction.UP, floor, false));
+        });
     }
 
-    static void detonate(Minecraft mc) {
+    static void queueDetonate(Minecraft mc) {
+        if (anchorPos == null) return;
+        q(() -> pickDetonator(mc));                  // switch to totem / empty slot (animation plays)
+        q(() -> detonateStep(mc, true));
+    }
+
+    static void detonateStep(Minecraft mc, boolean retry) {
         if (anchorPos == null) return;
 
-        // if the charge didn't land, charge again before detonating
+        // if the charge didn't land, charge again once before detonating
         BlockState st = mc.level.getBlockState(anchorPos);
-        if (st.is(Blocks.RESPAWN_ANCHOR)
+        if (retry && st.is(Blocks.RESPAWN_ANCHOR)
                 && st.getValue(RespawnAnchorBlock.CHARGE) == 0
-                && select(mc, Items.GLOWSTONE)) {
-            use(mc, clickOn(anchorPos));
+                && findSlot(mc, Items.GLOWSTONE) >= 0) {
+            queue.addFirst(() -> detonateStep(mc, false));
+            queue.addFirst(() -> pickDetonator(mc));
+            queue.addFirst(() -> use(mc, clickOn(anchorPos)));
+            queue.addFirst(() -> select(mc, Items.GLOWSTONE));
+            return;
         }
-        // totem if you have one, otherwise an empty slot, otherwise any non-glowstone item
-        if (!pickDetonator(mc)) return;
         use(mc, clickOn(anchorPos));
     }
 
@@ -138,6 +159,13 @@ public class MapTooltip implements ClientModInitializer {
 
     static BlockHitResult clickOn(BlockPos pos) {
         return new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
+    }
+
+    static int findSlot(Minecraft mc, Item item) {
+        for (int i = 0; i < 9; i++) {
+            if (mc.player.getInventory().getItem(i).is(item)) return i;
+        }
+        return -1;
     }
 
     static boolean pickDetonator(Minecraft mc) {
@@ -154,14 +182,10 @@ public class MapTooltip implements ClientModInitializer {
     }
 
     static boolean select(Minecraft mc, Item item) {
-        LocalPlayer p = mc.player;
-        for (int i = 0; i < 9; i++) {
-            if (p.getInventory().getItem(i).is(item)) {
-                p.getInventory().setSelectedSlot(i);
-                return true;
-            }
-        }
-        return false;
+        int i = findSlot(mc, item);
+        if (i < 0) return false;
+        mc.player.getInventory().setSelectedSlot(i);
+        return true;
     }
 
     static void use(Minecraft mc, BlockHitResult hit) {
