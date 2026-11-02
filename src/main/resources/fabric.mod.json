@@ -3,6 +3,7 @@
   "id": "maptooltip",
   "version": "${version}",
   "name": "maptooltip",
+  "icon": "assets/maptooltip/icon.png",
   "authors": ["VendoAU"],
   "license": "MIT",
   "environment": "client",
