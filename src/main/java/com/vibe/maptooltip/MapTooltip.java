@@ -6,17 +6,14 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Options;
 import net.minecraft.client.multiplayer.MultiPlayerGameMode;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
-import net.minecraft.network.protocol.game.ServerboundPlayerInputPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.InteractionHand;
-import net.minecraft.world.entity.player.Input;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
@@ -45,7 +42,7 @@ public class MapTooltip implements ClientModInitializer {
     public void onInitializeClient() {
         KeyMapping.Category cat = KeyMapping.Category.register(
                 Identifier.fromNamespaceAndPath("maptooltip", "main"));
-                ANCHOR    = reg("key.maptooltip.anchor",    96, cat); // 96 = ` (backtick)
+        ANCHOR    = reg("key.maptooltip.safe_anchor", 96, cat);                    // ` / ~ key
         GLOWSTONE = reg("key.maptooltip.glowstone", InputConstants.KEY_R, cat);
         TOTEM     = reg("key.maptooltip.totem",     InputConstants.KEY_TAB, cat);
         TOGGLE    = reg("key.maptooltip.toggle",    InputConstants.KEY_PAGEDOWN, cat);
@@ -81,6 +78,11 @@ public class MapTooltip implements ClientModInitializer {
 
         if (detonateIn >= 0 && --detonateIn < 0) detonate(mc);
 
+        if ((a || g || t) && p.isShiftKeyDown()) {
+            mc.gui.setOverlayMessage(Component.literal("maptooltip: release sneak"), false);
+            return;
+        }
+
         if (a && placeAnchor(mc) && AUTO_CHAIN) {
             chargeAndShield(mc);
             if (DETONATE_DELAY_TICKS <= 0) detonate(mc);
@@ -107,55 +109,35 @@ public class MapTooltip implements ClientModInitializer {
     static void chargeAndShield(Minecraft mc) {
         if (anchorPos == null || !select(mc, Items.GLOWSTONE)) return;
         LocalPlayer p = mc.player;
-        unsneaked(mc, () -> {
-            // charge the anchor once
-            use(mc, clickOn(anchorPos));
 
-            // shield on your side of the anchor, placed on top of the floor block there
-            Direction towardYou = p.getDirection().getOpposite();
-            BlockPos floor = anchorPos.below().relative(towardYou);
-            use(mc, new BlockHitResult(Vec3.atCenterOf(floor).add(0, 0.5, 0), Direction.UP, floor, false));
-        });
+        // charge the anchor once
+        use(mc, clickOn(anchorPos));
+
+        // shield on your side of the anchor, placed on top of the floor block there
+        Direction towardYou = p.getDirection().getOpposite();
+        BlockPos floor = anchorPos.below().relative(towardYou);
+        use(mc, new BlockHitResult(Vec3.atCenterOf(floor).add(0, 0.5, 0), Direction.UP, floor, false));
     }
 
     static void detonate(Minecraft mc) {
         if (anchorPos == null) return;
-        unsneaked(mc, () -> {
-            // if the charge didn't land, charge again before detonating
-            BlockState st = mc.level.getBlockState(anchorPos);
-            if (st.is(Blocks.RESPAWN_ANCHOR)
-                    && st.getValue(RespawnAnchorBlock.CHARGE) == 0
-                    && select(mc, Items.GLOWSTONE)) {
-                use(mc, clickOn(anchorPos));
-            }
-            // totem if you have one, otherwise an empty slot, otherwise any non-glowstone item
-            if (!pickDetonator(mc)) return;
+
+        // if the charge didn't land, charge again before detonating
+        BlockState st = mc.level.getBlockState(anchorPos);
+        if (st.is(Blocks.RESPAWN_ANCHOR)
+                && st.getValue(RespawnAnchorBlock.CHARGE) == 0
+                && select(mc, Items.GLOWSTONE)) {
             use(mc, clickOn(anchorPos));
-        });
+        }
+        // totem if you have one, otherwise an empty slot, otherwise any non-glowstone item
+        if (!pickDetonator(mc)) return;
+        use(mc, clickOn(anchorPos));
     }
 
     // ---- helpers ------------------------------------------------------------
 
     static BlockHitResult clickOn(BlockPos pos) {
         return new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
-    }
-
-    /** Holding sneak makes the server place the glowstone instead of using the anchor, so release it for the clicks. */
-    static void unsneaked(Minecraft mc, Runnable r) {
-        Options o = mc.options;
-        var conn = mc.getConnection();
-        boolean sneaking = conn != null && (o.keyShift.isDown() || mc.player.isShiftKeyDown());
-        if (sneaking) conn.send(new ServerboundPlayerInputPacket(input(o, false)));
-        try {
-            r.run();
-        } finally {
-            if (sneaking) conn.send(new ServerboundPlayerInputPacket(input(o, o.keyShift.isDown())));
-        }
-    }
-
-    static Input input(Options o, boolean shift) {
-        return new Input(o.keyUp.isDown(), o.keyDown.isDown(), o.keyLeft.isDown(),
-                o.keyRight.isDown(), o.keyJump.isDown(), shift, o.keySprint.isDown());
     }
 
     static boolean pickDetonator(Minecraft mc) {
