@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "maptooltip",
+  "version": "${version}",
+  "name": "maptooltip",
+  "authors": ["you"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["com.vibe.maptooltip.MapTooltip"] },
+  "depends": { "fabricloader": "*", "fabric-api": "*", "minecraft": "*" }
+}
