@@ -2,9 +2,8 @@ package com.vibe.maptooltip;
 
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
-import net.minecraft.world.inventory.ClickType;
+import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Items;
 
@@ -31,16 +30,31 @@ public class HoverTotem {
     }
 
     static void swap(Minecraft mc, Slot slot, int button) {
-        mc.gameMode.handleInventoryMouseClick(
-                mc.player.containerMenu.containerId, slot.index, button, ClickType.SWAP, mc.player);
+        mc.gameMode.handleContainerInput(
+                mc.player.containerMenu.containerId, slot.index, button, ContainerInput.SWAP, mc.player);
         cooldown = 2;
     }
 
-    static void tick(Minecraft mc, AbstractContainerScreen<?> screen) {
+    /** Finds the inventory slot under the mouse cursor. */
+    static Slot slotUnderMouse(Minecraft mc, InventoryScreen screen) {
+        double mx = mc.mouseHandler.xpos() * mc.getWindow().getGuiScaledWidth() / mc.getWindow().getScreenWidth();
+        double my = mc.mouseHandler.ypos() * mc.getWindow().getGuiScaledHeight() / mc.getWindow().getScreenHeight();
+        int left = (screen.width - 176) / 2;
+        int top = (screen.height - 166) / 2;
+        for (Slot s : mc.player.containerMenu.slots) {
+            if (mx >= left + s.x - 1 && mx < left + s.x + 17
+                    && my >= top + s.y - 1 && my < top + s.y + 17) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    static void tick(Minecraft mc, InventoryScreen screen) {
         if (!MapTooltip.enabled || mc.player == null || mc.gameMode == null) return;
         if (cooldown > 0) { cooldown--; return; }
 
-        Slot slot = screen.getSlotUnderMouse();
+        Slot slot = slotUnderMouse(mc, screen);
         if (slot == null || !slot.getItem().is(Items.TOTEM_OF_UNDYING)) return;
         // only inventory + hotbar slots (not armor, crafting or the offhand slot itself)
         if (slot.index < MENU_FIRST || slot.index > MENU_LAST) return;
