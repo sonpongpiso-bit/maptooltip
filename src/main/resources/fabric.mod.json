@@ -3,9 +3,14 @@
   "id": "maptooltip",
   "version": "${version}",
   "name": "maptooltip",
-  "authors": ["you"],
+  "authors": ["VendoAU"],
   "license": "MIT",
   "environment": "client",
-  "entrypoints": { "client": ["com.vibe.maptooltip.MapTooltip"] },
+  "entrypoints": {
+    "client": [
+      "com.vibe.maptooltip.MapTooltip",
+      "com.vibe.maptooltip.CrystalMacro"
+    ]
+  },
   "depends": { "fabricloader": "*", "fabric-api": "*", "minecraft": "*" }
 }
