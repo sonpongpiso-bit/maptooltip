@@ -24,15 +24,21 @@ public class CrystalMacro implements ClientModInitializer {
     // ---- delays (in ticks, 20 ticks = 1 second). Raise these if your server lags. ----
     /** Ticks between each place / break action while right-click is held. */
     static final int CYCLE_DELAY_TICKS = 1;
-    /** Ticks to wait after placing obsidian before the first crystal. */
+    /** Ticks to wait after switching back from obsidian before the first crystal. */
     static final int OBSIDIAN_DELAY_TICKS = 2;
     /** Give up (until you release right-click) if the obsidian never shows up. */
     static final int OBSIDIAN_TIMEOUT_TICKS = 20;
 
-    enum State { IDLE, LOOP }
+    // Obsidian step runs one stage per tick so each hotbar switch shows its animation.
+    enum State { IDLE, OBS_SELECT, OBS_PLACE, OBS_BACK, LOOP }
 
     static State state = State.IDLE;
     static BlockPos base = null;       // the obsidian block the crystals sit on
+    static BlockHitResult pendingHit = null;
+    static BlockPos pendingSpot = null;
+    static int hotbarObs = -1;
+    static int invObs = -1;
+    static boolean swapped = false;
     static int crystalSlot = 0;
     static int cooldown = 0;
     static int waitObsidian = 0;
@@ -46,8 +52,22 @@ public class CrystalMacro implements ClientModInitializer {
     static void reset() {
         state = State.IDLE;
         base = null;
+        pendingHit = null;
+        pendingSpot = null;
+        hotbarObs = -1;
+        invObs = -1;
+        swapped = false;
         cooldown = 0;
         waitObsidian = 0;
+    }
+
+    /** Stop mid-way and put your hotbar back how it was. */
+    static void abort(Minecraft mc) {
+        if (swapped && invObs >= 0) swapIn(mc, invObs, crystalSlot);
+        if (state == State.OBS_SELECT || state == State.OBS_PLACE || state == State.OBS_BACK) {
+            mc.player.getInventory().setSelectedSlot(crystalSlot);
+        }
+        reset();
     }
 
     static void tick(Minecraft mc) {
@@ -60,23 +80,47 @@ public class CrystalMacro implements ClientModInitializer {
         boolean down = mc.options.keyUse.isDown();
         if (!down) blocked = false;
 
-        // stop as soon as right-click is released, a menu opens, the mod is off, or the crystal isn't in hand
-        if (state == State.LOOP
-                && (!down || mc.screen != null || !MapTooltip.enabled
-                    || !mc.player.getMainHandItem().is(Items.END_CRYSTAL))) {
-            reset();
+        // stop when right-click is released, a menu opens, or the mod is off
+        if (state != State.IDLE && (!down || mc.screen != null || !MapTooltip.enabled)) {
+            abort(mc);
             return;
         }
 
-        if (state == State.IDLE) {
-            if (down && !blocked && MapTooltip.enabled && mc.screen == null
-                    && mc.player.getMainHandItem().is(Items.END_CRYSTAL)) {
-                start(mc);
+        switch (state) {
+            case IDLE -> {
+                if (down && !blocked && MapTooltip.enabled && mc.screen == null
+                        && mc.player.getMainHandItem().is(Items.END_CRYSTAL)) {
+                    start(mc);
+                }
             }
-            return;
+            case OBS_SELECT -> {
+                if (hotbarObs >= 0) {
+                    mc.player.getInventory().setSelectedSlot(hotbarObs);   // switch (animation plays)
+                } else {
+                    swapIn(mc, invObs, crystalSlot);                       // pull obsidian into the held slot
+                    swapped = true;
+                }
+                state = State.OBS_PLACE;
+            }
+            case OBS_PLACE -> {
+                use(mc, pendingHit);                                       // place the obsidian
+                state = State.OBS_BACK;
+            }
+            case OBS_BACK -> {
+                if (swapped) {
+                    swapIn(mc, invObs, crystalSlot);
+                    swapped = false;
+                }
+                mc.player.getInventory().setSelectedSlot(crystalSlot);     // back to the crystal (animation plays)
+                BlockPos spot = pendingSpot;
+                pendingHit = null;
+                beginLoop(spot, OBSIDIAN_DELAY_TICKS);
+            }
+            case LOOP -> {
+                if (!mc.player.getMainHandItem().is(Items.END_CRYSTAL)) { reset(); return; }
+                loop(mc);
+            }
         }
-
-        loop(mc);
     }
 
     /** Check what you're aiming at; place obsidian only if there isn't any. */
@@ -105,22 +149,14 @@ public class CrystalMacro implements ClientModInitializer {
             return;
         }
 
-        int hotbarObs = findHotbar(mc, Items.OBSIDIAN);
-        int invObs = hotbarObs >= 0 ? -1 : findInventory(mc, Items.OBSIDIAN);
+        hotbarObs = findHotbar(mc, Items.OBSIDIAN);
+        invObs = hotbarObs >= 0 ? -1 : findInventory(mc, Items.OBSIDIAN);
         if (hotbarObs < 0 && invObs < 0) { blocked = true; return; }
 
-        if (hotbarObs >= 0) {
-            mc.player.getInventory().setSelectedSlot(hotbarObs);
-            use(mc, hit);
-            mc.player.getInventory().setSelectedSlot(crystalSlot);   // back to the crystal right away
-        } else {
-            // obsidian is in the main inventory: swap it into the held slot, place, swap back
-            swapIn(mc, invObs, crystalSlot);
-            use(mc, hit);
-            swapIn(mc, invObs, crystalSlot);
-        }
-
-        beginLoop(spot, OBSIDIAN_DELAY_TICKS);
+        pendingHit = hit;
+        pendingSpot = spot;
+        swapped = false;
+        state = State.OBS_SELECT;
     }
 
     static void beginLoop(BlockPos obsidian, int delay) {
@@ -159,7 +195,6 @@ public class CrystalMacro implements ClientModInitializer {
             mc.gameMode.attack(mc.player, crystals.get(0));
             mc.player.swing(InteractionHand.MAIN_HAND);
         } else if (mc.level.getBlockState(base.above()).isAir()) {
-            mc.player.getInventory().setSelectedSlot(crystalSlot);
             use(mc, new BlockHitResult(Vec3.atCenterOf(base).add(0, 0.5, 0), Direction.UP, base, false));
         }
     }
